@@ -1,0 +1,83 @@
+{
+  "blocks": [
+    {
+      "id": "B1",
+      "content": {
+        "text": [
+          "Christmas"
+        ]
+      }
+    },
+    {
+      "id": "B2",
+      "content": {
+        "text": [
+          "Go shopping"
+        ]
+      }
+    },
+    {
+      "id": "B3",
+      "content": {
+        "text": [
+          "Let me think"
+        ]
+      }
+    },
+    {
+      "id": "B4",
+      "content": {
+        "text": [
+          "Laptop"
+        ]
+      }
+    },
+    {
+      "id": "B5",
+      "content": {
+        "text": [
+          "iPhone"
+        ]
+      }
+    },
+    {
+      "id": "B6",
+      "content": {
+        "text": [
+          "Car"
+        ]
+      }
+    }
+  ],
+  "relationships": [
+    {
+      "from": "B1",
+      "to": "B2",
+      "label": "Get money",
+      "direction": "forward"
+    },
+    {
+      "from": "B2",
+      "to": "B3",
+      "direction": "forward"
+    },
+    {
+      "from": "B3",
+      "to": "B4",
+      "label": "One",
+      "direction": "forward"
+    },
+    {
+      "from": "B3",
+      "to": "B5",
+      "label": "Two",
+      "direction": "forward"
+    },
+    {
+      "from": "B3",
+      "to": "B6",
+      "label": "Three",
+      "direction": "forward"
+    }
+  ]
+}
