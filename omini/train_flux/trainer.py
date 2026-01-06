@@ -75,28 +75,27 @@ class OminiModel(L.LightningModule):
         self.transformer.gradient_checkpointing = gradient_checkpointing
         self.transformer.train()
         # Load LongT5 model for text encoding
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            "Stancld/longt5-tglobal-large-16384-pubmed-3k_steps"
-        )
-        self.longt5 = LongT5ForConditionalGeneration.from_pretrained(
-            "Stancld/longt5-tglobal-large-16384-pubmed-3k_steps"
-        ).to(device=device, dtype=dtype).eval()
+        # self.tokenizer = AutoTokenizer.from_pretrained(
+        #     "Stancld/longt5-tglobal-large-16384-pubmed-3k_steps"
+        # )
+        # self.longt5 = LongT5ForConditionalGeneration.from_pretrained(
+        #     "Stancld/longt5-tglobal-large-16384-pubmed-3k_steps"
+        # ).to(device=device, dtype=dtype).eval()
 
-        for p in self.longt5.parameters():  # Freeze LongT5 parameters
-            p.requires_grad_(False)
+        # for p in self.longt5.parameters():  # Freeze LongT5 parameters
+        #     p.requires_grad_(False)
 
         # Projection layers
-        t5_hidden = self.longt5.config.d_model  # typically 1024
-        flux_token_dim = self.transformer.context_embedder.in_features  # flux: 4096
-        self.t5_proj = torch.nn.Linear(
-            t5_hidden, flux_token_dim, bias=False
-        ).to(device=device, dtype=dtype)
+        # t5_hidden = self.longt5.config.d_model  # typically 1024
+        # flux_token_dim = self.transformer.context_embedder.in_features  # flux: 4096
+        # self.t5_proj = torch.nn.Linear(
+        #     t5_hidden, flux_token_dim, bias=False
+        # ).to(device=device, dtype=dtype)
 
-        self.t5_pool_proj = torch.nn.Linear(
-            flux_token_dim, 768, bias=False
-        ).to(device=device, dtype=dtype)
-
-        self.t5_proj_params = list(self.t5_proj.parameters()) + list(self.t5_pool_proj.parameters())
+        # self.t5_pool_proj = torch.nn.Linear(
+        #     flux_token_dim, 768, bias=False
+        # ).to(device=device, dtype=dtype)
+        # self.t5_proj_params = list(self.t5_proj.parameters()) + list(self.t5_pool_proj.parameters())
 
 
         # Freeze the Flux pipeline
@@ -134,6 +133,8 @@ class OminiModel(L.LightningModule):
     def init_lora(self, lora_path: str, lora_config: dict):
         assert lora_path or lora_config
         adapter_name = self.active_adapter
+        target_regex = (lora_config or {}).get("target_modules", ".*")
+
         if lora_path:
             # TODO: Implement this
             local_dir, weight_name = self._resolve_local_lora(lora_path)
@@ -147,12 +148,18 @@ class OminiModel(L.LightningModule):
                 # self.k_encoder.load_state_dict(state, strict=True)
                 # print(f"[K-MLP] Loaded from {safep}")
 
+            else:
+                self.flux_pipe.load_lora_weights_from_hf(
+                    lora_path, adapter_name=adapter_name
+                )
+                print(f"[LoRA] Loaded from HF repo: {lora_path} as adapter='{adapter_name}'")
             # Collect trainable LoRA parameters after loading
-            lora_layers = [p for n, p in self.transformer.named_parameters() if "lora" in n and p.requires_grad]
-            if not lora_layers:
-                lora_layers = [p for p in self.transformer.parameters() if p.requires_grad]
+            
+            lora_layers = self._collect_lora_params_by_config(adapter_name, target_regex)
 
         else:
+            # config: target_modules, r, init_lora_weight...
+            # add adapters: insert new lora layers into the transformer
             for adapter_name in self.adapter_set:
                 self.transformer.add_adapter(
                     LoraConfig(**lora_config), adapter_name=adapter_name
@@ -173,17 +180,23 @@ class OminiModel(L.LightningModule):
                 ),
                 safe_serialization=True,
             )
+        k_path_st = os.path.join(path, "k_mlp.safetensors")
+
+        state = self.k_encoder.state_dict()
+
+        safetensors_save(state, k_path_st)
+        print(f"[K-MLP] Saved to {k_path_st}")
 
     def configure_optimizers(self):
         # Freeze the transformer
         self.transformer.requires_grad_(False)
         opt_config = self.optimizer_config
-        param_cfg = opt_config.get("params", {k: v for k, v in opt_config.items() if k != "type"})
+        # param_cfg = opt_config.get("params", {k: v for k, v in opt_config.items() if k != "type"})
 
         # Set the trainable parameters
         self.trainable_params = list(self.lora_layers)
-        if self.t5_proj_params:
-            self.trainable_params += list(self.t5_proj_params)
+        # if self.t5_proj_params:
+        #     self.trainable_params += list(self.t5_proj_params)
 
         # Unfreeze trainable parameters
         for p in self.trainable_params:
@@ -195,7 +208,7 @@ class OminiModel(L.LightningModule):
         elif opt_config["type"] == "Prodigy":
             optimizer = prodigyopt.Prodigy(
                 self.trainable_params,
-                **param_cfg,
+                **opt_config["params"],
             )
         elif opt_config["type"] == "SGD":
             optimizer = torch.optim.SGD(self.trainable_params, **param_cfg)
@@ -203,36 +216,36 @@ class OminiModel(L.LightningModule):
             raise NotImplementedError("Optimizer not implemented.")
         return optimizer
 
-    def encode_prompt_longt5(self, prompts, max_len=16384):
-        # encode with longt5
-        inputs = self.tokenizer(
-            prompts,
-            padding="longest",
-            truncation=True,
-            max_length=max_len,
-            return_tensors="pt"
-        ).to(self.device_torch)
+    # def encode_prompt_longt5(self, prompts, max_len=16384):
+    #     # encode with longt5
+    #     inputs = self.tokenizer(
+    #         prompts,
+    #         padding="longest",
+    #         truncation=True,
+    #         max_length=max_len,
+    #         return_tensors="pt"
+    #     ).to(self.device_torch)
 
-        with torch.no_grad():
-            encoder_t5 = self.longt5.encoder(
-                input_ids=inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                return_dict=True,
-            )
+    #     with torch.no_grad():
+    #         encoder_t5 = self.longt5.encoder(
+    #             input_ids=inputs.input_ids,
+    #             attention_mask=inputs.attention_mask,
+    #             return_dict=True,
+    #         )
         
-        t5_hidden = encoder_t5.last_hidden_state  # (b, seq, d_model)
-        token_4096 = self.t5_proj(t5_hidden)  # (b, seq, flux_token_dim)
+    #     t5_hidden = encoder_t5.last_hidden_state  # (b, seq, d_model)
+    #     token_4096 = self.t5_proj(t5_hidden)  # (b, seq, flux_token_dim)
 
 
-        mask = inputs.attention_mask.unsqueeze(-1)
-        pooled_4096 = (token_4096 * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        pooled_768 = self.t5_pool_proj(pooled_4096)  # (b, 768)
+    #     mask = inputs.attention_mask.unsqueeze(-1)
+    #     pooled_4096 = (token_4096 * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+    #     pooled_768 = self.t5_pool_proj(pooled_4096)  # (b, 768)
 
-        seq_len = token_4096.shape[1]
-        text_ids = torch.zeros((seq_len,3), dtype=torch.long, device=self.device_torch)
-        text_ids[:, 0] = torch.arange(seq_len, device=self.device_torch)
+    #     seq_len = token_4096.shape[1]
+    #     text_ids = torch.zeros((seq_len,3), dtype=torch.long, device=self.device_torch)
+    #     text_ids[:, 0] = torch.arange(seq_len, device=self.device_torch)
 
-        return token_4096, pooled_768, text_ids
+    #     return token_4096, pooled_768, text_ids
 
     def training_step(self, batch, batch_idx):
         imgs, prompts = batch["image"], batch["description"]
@@ -258,10 +271,25 @@ class OminiModel(L.LightningModule):
                 prompt_embeds,
                 pooled_prompt_embeds,
                 text_ids,
-            ) = self.encode_prompt_longt5(
-                prompts,
-                max_len=self.model_config.get("max_sequence_length", 16384),
+            ) = self.flux_pipe.encode_prompt(
+                prompt=prompts,
+                prompt_2=None,
+                prompt_embeds=None,
+                pooled_prompt_embeds=None,
+                device=self.flux_pipe.device,
+                num_images_per_prompt=1,
+                max_sequence_length=self.model_config.get("max_sequence_length", 512),
+                lora_scale=None,
             )
+            # (
+            #     prompt_embeds,
+            #     pooled_prompt_embeds,
+            #     text_ids,
+            # ) = self.encode_prompt_longt5(
+            #     prompts,
+            #     max_len=self.model_config.get("max_sequence_length", 16384),
+            # )
+
 
             # Prepare t and x_t
             t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device_torch))
@@ -429,7 +457,7 @@ def train(dataset, trainable_model, config, test_function):
     run_name = time.strftime("%Y%m%d-%H%M%S")
 
     # Initialize WanDB
-    wandb_config = training_config.get("wandb", None)
+    wandb_config = training_confIIig.get("wandb", None)
     if wandb_config is not None and is_main_process:
         init_wandb(wandb_config, run_name)
 
