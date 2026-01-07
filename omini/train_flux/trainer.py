@@ -7,14 +7,15 @@ import yaml
 from peft import LoraConfig, get_peft_model_state_dict
 from torch.utils.data import DataLoader
 import time
-
+import re
 from typing import List
 
 import prodigyopt
 
 from ..pipeline.flux_omini import transformer_forward, encode_images
-
-from transformers import AutoTokenizer, LongT5ForConditionalGeneration
+import math
+from typing import List
+from safetensors.torch import save_file as safetensors_save, load_file as safetensors_load
 
 def get_rank():
     try:
@@ -44,7 +45,114 @@ def init_wandb(wandb_config, run_name):
         )
     except Exception as e:
         print("Failed to initialize WanDB:", e)
+# class SiLUBokehKEncoder(torch.nn.Module):
+#     def __init__(self, latent_channels=64, mlp_hidden=256, alpha=0.1, dtype=torch.bfloat16):
+#         super().__init__()
+#         self.alpha = alpha
+#         self.mlp = torch.nn.Sequential(
+#             torch.nn.Linear(1, mlp_hidden),
+#             torch.nn.SiLU(),
+#             torch.nn.Linear(mlp_hidden, latent_channels),
+#         )
+#         # 小心初始化，穩定一點
+#         for m in self.mlp.modules():
+#             if isinstance(m, torch.nn.Linear):
+#                 torch.nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
+#                 if m.bias is not None:
+#                     torch.nn.init.zeros_(m.bias)
 
+#     def forward(self, K):
+#         if K.ndim == 1: K = K[:, None]
+#         x = (self.alpha * K).to(torch.bfloat16)   # 相當於 K/=10
+#         y = self.mlp(x)
+#         return y
+
+# import torch.nn.functional as F
+# from torch.nn.utils import parametrize
+# import torch.nn as nn
+# class SoftplusParam(nn.Module):
+#     def forward(self, w):
+#         # 將任意實數權重 w_raw 經 softplus 變成非負權重
+#         return F.softplus(w)
+
+# class BokehKEncoder(nn.Module):
+#     def __init__(self, latent_channels=4096, mlp_hidden=256, alpha=0.1, dtype=torch.bfloat16):
+#         super().__init__()
+#         self.alpha = alpha
+#         self.dtype = dtype
+
+#         self.mlp = nn.Sequential(
+#             nn.Linear(1, mlp_hidden),   # 層 0
+#             nn.Softplus(),              # 單調激活
+#             nn.Linear(mlp_hidden, latent_channels),  # 層 2
+#         )
+
+#         # 只改「權重非負」，結構不變
+#         parametrize.register_parametrization(self.mlp[0], "weight", SoftplusParam())
+#         parametrize.register_parametrization(self.mlp[2], "weight", SoftplusParam())
+
+#         # 初始化：raw 權重靠近 0 更穩（因為最後會 softplus）
+#         with torch.no_grad():
+#             for m in self.mlp.modules():
+#                 if isinstance(m, nn.Linear):
+#                     m.weight.zero_()
+#                     if m.bias is not None:
+#                         m.bias.zero_()
+
+#     def forward(self, K):
+#         if K.ndim == 1:
+#             K = K[:, None]
+        
+#         x = (self.alpha * K).to(torch.bfloat16)
+#         y = self.mlp(x)
+#         return y
+# class SiLUBokehKEncoder(torch.nn.Module):
+#     """
+#     將標量 K -> [sin/cos PE] -> MLP -> latent_channel 維度
+#     """
+#     def __init__(self, latent_channels: int, pe_dims: int = 64, mlp_hidden: int = 256, dtype=torch.bfloat16):
+#         super().__init__()
+#         self.latent_channels = latent_channels
+#         self.pe_dims = pe_dims
+#         self.dtype = dtype
+
+#         in_dim = pe_dims * 2  # sin + cos
+#         self.mlp = torch.nn.Sequential(
+#             torch.nn.Linear(in_dim, mlp_hidden),
+#             torch.nn.SiLU(),
+#             torch.nn.Linear(mlp_hidden, latent_channels),
+#         )
+
+#         # 小心初始化，穩定一點
+#         for m in self.mlp.modules():
+#             if isinstance(m, torch.nn.Linear):
+#                 torch.nn.init.kaiming_uniform_(m.weight, a=math.sqrt(5))
+#                 if m.bias is not None:
+#                     torch.nn.init.zeros_(m.bias)
+
+#     @staticmethod
+#     def _posenc(x: torch.Tensor, pe_dims: int):
+#         """
+#         x: [B] 或 [B,1]
+#         回傳: [B, pe_dims*2]，按對數頻率做 sin/cos
+#         """
+#         if x.ndim == 1:
+#             x = x[:, None]
+#         device = x.device
+#         # 使用 log scale 頻率
+#         freqs = torch.exp(torch.linspace(math.log(1.0), math.log(64.0), pe_dims, device=device))
+#         phases = x * freqs[None, :]
+#         return torch.cat([torch.sin(phases), torch.cos(phases)], dim=-1)
+
+#     def forward(self, K: torch.Tensor):
+#         """
+#         K: [B] 或 [B,1]  (float)
+#         return: [B, C]
+#         """
+#         K = K.to(self.dtype)
+#         pe = self._posenc(K, self.pe_dims).to(self.dtype)
+#         feat = self.mlp(pe).to(self.dtype)    # [B, C]
+#         return feat
 
 class OminiModel(L.LightningModule):
     def __init__(
@@ -55,7 +163,7 @@ class OminiModel(L.LightningModule):
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         model_config: dict = {},
-        adapter_names: List[str] = ["default", None],
+        adapter_names: List[str] = [None, None, "default"],
         optimizer_config: dict = None,
         gradient_checkpointing: bool = False,
     ):
@@ -63,40 +171,14 @@ class OminiModel(L.LightningModule):
         super().__init__()
         self.model_config = model_config
         self.optimizer_config = optimizer_config
-        self.device_torch = torch.device(device)
-        self.dtype_torch = dtype
 
         # Load the Flux pipeline
         self.flux_pipe: FluxPipeline = FluxPipeline.from_pretrained(
             flux_pipe_id, torch_dtype=dtype
         ).to(device)
-
         self.transformer = self.flux_pipe.transformer
         self.transformer.gradient_checkpointing = gradient_checkpointing
         self.transformer.train()
-        # Load LongT5 model for text encoding
-        # self.tokenizer = AutoTokenizer.from_pretrained(
-        #     "Stancld/longt5-tglobal-large-16384-pubmed-3k_steps"
-        # )
-        # self.longt5 = LongT5ForConditionalGeneration.from_pretrained(
-        #     "Stancld/longt5-tglobal-large-16384-pubmed-3k_steps"
-        # ).to(device=device, dtype=dtype).eval()
-
-        # for p in self.longt5.parameters():  # Freeze LongT5 parameters
-        #     p.requires_grad_(False)
-
-        # Projection layers
-        # t5_hidden = self.longt5.config.d_model  # typically 1024
-        # flux_token_dim = self.transformer.context_embedder.in_features  # flux: 4096
-        # self.t5_proj = torch.nn.Linear(
-        #     t5_hidden, flux_token_dim, bias=False
-        # ).to(device=device, dtype=dtype)
-
-        # self.t5_pool_proj = torch.nn.Linear(
-        #     flux_token_dim, 768, bias=False
-        # ).to(device=device, dtype=dtype)
-        # self.t5_proj_params = list(self.t5_proj.parameters()) + list(self.t5_pool_proj.parameters())
-
 
         # Freeze the Flux pipeline
         self.flux_pipe.text_encoder.requires_grad_(False).eval()
@@ -104,13 +186,24 @@ class OminiModel(L.LightningModule):
         self.flux_pipe.vae.requires_grad_(False).eval()
         self.adapter_names = adapter_names
         self.adapter_set = set([each for each in adapter_names if each is not None])
-        self.active_adapter = next((a for a in self.adapter_names if a is not None), "default")
+        self.active_adapter = next(
+        (a for a in reversed(adapter_names) if a is not None),  # 生成器：從尾到頭找非 None
+        "default"                                               # 找不到時的預設值
+        )
+        # # ---- 建立 K 編碼器（可訓練）----這裡要調查一下數據!
+        # self.k_encoder = BokehKEncoder(
+        #     latent_channels=4096, #這裡要變成跟text branch一樣的channel，prompt_embeds.shape=[1,512,4096]
+        #     mlp_hidden=self.model_config.get("k_mlp_hidden", 256),
+        #     dtype=dtype,
+        # ).to(device).to(dtype)
+        # self.renderer = ModuleRenderScatter().to(device).eval()
+        # self.flux_pipe.k_encoder = self.k_encoder
         # Initialize LoRA layers
         self.lora_layers = self.init_lora(lora_path, lora_config)
 
         self.to(device).to(dtype)
-
-
+    
+       
     def _resolve_local_lora(self, path_or_dir: str) -> tuple[str, str]:
         """
         回傳 (dir, weight_name)。支援：
@@ -128,17 +221,53 @@ class OminiModel(L.LightningModule):
                 raise FileNotFoundError(f"No .safetensors found under: {path_or_dir}")
             return path_or_dir, weight
         return None, None
-    
 
+    # ---------- 核心：用你的 target_modules 正則 精準開 requires_grad ----------
+    def _collect_lora_paramsOminiModel_by_config(self, adapter_name: str, target_regex: str):
+        """
+        直接從 transformer.named_parameters() 收集 LoRA 參數：
+        - 抓到 *.lora_A/B/up/down.weight
+        - 用 target_regex（你的 target_modules）對 base 路徑做白名單篩選
+        """
+        pat = re.compile(target_regex)
+        suffixes = (".lora_A.weight", ".lora_B.weight", ".lora_up.weight", ".lora_down.weight")
+
+        selected = []
+        total_lora = 0
+        for name, p in self.transformer.named_parameters():
+            if any(sfx in name for sfx in suffixes):
+                total_lora += 1
+                base = name
+                for sfx in suffixes:
+                    base = base.replace(sfx, "")
+                # e.g. base = "transformer.blocks.3.attn.to_q"
+                if pat.search(base):
+                    p.requires_grad_(True)
+                    selected.append(p)
+
+        if not selected:
+            # regex 太嚴了 → 回退：把所有 LoRA 參數全開，避免 optimizer 空參數
+            for name, p in self.transformer.named_parameters():
+                if "lora_" in name:
+                    p.requires_grad_(True)
+                    selected.append(p)
+            print("[LoRA] WARN: target_modules regex 沒匹配到任何層，已回退為啟用所有 LoRA 權重。")
+
+        print(f"[LoRA] Trainable params matched by regex: {len(selected)} / {total_lora}")
+        return selected
     def init_lora(self, lora_path: str, lora_config: dict):
-        assert lora_path or lora_config
+        assert (lora_path is not None) or (lora_config is not None), \
+            "Either lora_path or lora_config must be provided."
+
         adapter_name = self.active_adapter
+        # 預設：用 config 的 target_modules 正則；若無則退回 '.*'
         target_regex = (lora_config or {}).get("target_modules", ".*")
 
         if lora_path:
-            # TODO: Implement this
             local_dir, weight_name = self._resolve_local_lora(lora_path)
+
             if local_dir is not None:
+                # 本地載入
                 self.flux_pipe.load_lora_weights(local_dir, weight_name=weight_name, adapter_name=adapter_name)
                 print(f"[LoRA] Loaded from local: {os.path.join(local_dir, weight_name)} "
                       f"as adapter='{adapter_name}'")
@@ -149,17 +278,13 @@ class OminiModel(L.LightningModule):
                 # print(f"[K-MLP] Loaded from {safep}")
 
             else:
-                self.flux_pipe.load_lora_weights_from_hf(
-                    lora_path, adapter_name=adapter_name
-                )
+                # HF repo（可留著以後用）
+                self.flux_pipe.load_lora_weights(lora_path, weight_name=None, adapter_name=adapter_name)
                 print(f"[LoRA] Loaded from HF repo: {lora_path} as adapter='{adapter_name}'")
-            # Collect trainable LoRA parameters after loading
-            
-            lora_layers = self._collect_lora_params_by_config(adapter_name, target_regex)
 
+            # 僅開啟符合 target_regex 的 LoRA 權重
+            lora_layers = self._collect_lora_params_by_config(adapter_name, target_regex)
         else:
-            # config: target_modules, r, init_lora_weight...
-            # add adapters: insert new lora layers into the transformer
             for adapter_name in self.adapter_set:
                 self.transformer.add_adapter(
                     LoraConfig(**lora_config), adapter_name=adapter_name
@@ -168,7 +293,13 @@ class OminiModel(L.LightningModule):
             lora_layers = filter(
                 lambda p: p.requires_grad, self.transformer.parameters()
             )
-        return list(lora_layers)
+        # ---- 無論 有沒有load，K-MLP 一律可訓練並併入回傳清單 ----
+        #k_params = list(self.k_encoder.parameters())
+        #不用先把grad打開，之後configure_optimizers會一併把lora_layer裡面的東西打開
+        # for p in k_params:
+        #     p.requires_grad_(True)
+
+        return list(lora_layers)#+k_params
 
     def save_lora(self, path: str):
         for adapter_name in self.adapter_set:
@@ -180,6 +311,7 @@ class OminiModel(L.LightningModule):
                 ),
                 safe_serialization=True,
             )
+                # 再存 K-MLP
         k_path_st = os.path.join(path, "k_mlp.safetensors")
 
         state = self.k_encoder.state_dict()
@@ -191,12 +323,9 @@ class OminiModel(L.LightningModule):
         # Freeze the transformer
         self.transformer.requires_grad_(False)
         opt_config = self.optimizer_config
-        # param_cfg = opt_config.get("params", {k: v for k, v in opt_config.items() if k != "type"})
 
         # Set the trainable parameters
-        self.trainable_params = list(self.lora_layers)
-        # if self.t5_proj_params:
-        #     self.trainable_params += list(self.t5_proj_params)
+        self.trainable_params = self.lora_layers
 
         # Unfreeze trainable parameters
         for p in self.trainable_params:
@@ -204,48 +333,17 @@ class OminiModel(L.LightningModule):
 
         # Initialize the optimizer
         if opt_config["type"] == "AdamW":
-            optimizer = torch.optim.AdamW(self.trainable_params, **param_cfg)
+            optimizer = torch.optim.AdamW(self.trainable_params, **opt_config["params"])
         elif opt_config["type"] == "Prodigy":
             optimizer = prodigyopt.Prodigy(
                 self.trainable_params,
                 **opt_config["params"],
             )
         elif opt_config["type"] == "SGD":
-            optimizer = torch.optim.SGD(self.trainable_params, **param_cfg)
+            optimizer = torch.optim.SGD(self.trainable_params, **opt_config["params"])
         else:
             raise NotImplementedError("Optimizer not implemented.")
         return optimizer
-
-    # def encode_prompt_longt5(self, prompts, max_len=16384):
-    #     # encode with longt5
-    #     inputs = self.tokenizer(
-    #         prompts,
-    #         padding="longest",
-    #         truncation=True,
-    #         max_length=max_len,
-    #         return_tensors="pt"
-    #     ).to(self.device_torch)
-
-    #     with torch.no_grad():
-    #         encoder_t5 = self.longt5.encoder(
-    #             input_ids=inputs.input_ids,
-    #             attention_mask=inputs.attention_mask,
-    #             return_dict=True,
-    #         )
-        
-    #     t5_hidden = encoder_t5.last_hidden_state  # (b, seq, d_model)
-    #     token_4096 = self.t5_proj(t5_hidden)  # (b, seq, flux_token_dim)
-
-
-    #     mask = inputs.attention_mask.unsqueeze(-1)
-    #     pooled_4096 = (token_4096 * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-    #     pooled_768 = self.t5_pool_proj(pooled_4096)  # (b, 768)
-
-    #     seq_len = token_4096.shape[1]
-    #     text_ids = torch.zeros((seq_len,3), dtype=torch.long, device=self.device_torch)
-    #     text_ids[:, 0] = torch.arange(seq_len, device=self.device_torch)
-
-    #     return token_4096, pooled_768, text_ids
 
     def training_step(self, batch, batch_idx):
         imgs, prompts = batch["image"], batch["description"]
@@ -281,21 +379,12 @@ class OminiModel(L.LightningModule):
                 max_sequence_length=self.model_config.get("max_sequence_length", 512),
                 lora_scale=None,
             )
-            # (
-            #     prompt_embeds,
-            #     pooled_prompt_embeds,
-            #     text_ids,
-            # ) = self.encode_prompt_longt5(
-            #     prompts,
-            #     max_len=self.model_config.get("max_sequence_length", 16384),
-            # )
-
 
             # Prepare t and x_t
-            t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device_torch))
-            x_1 = torch.randn_like(x_0).to(self.device_torch)
+            t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device))
+            x_1 = torch.randn_like(x_0).to(self.device)
             t_ = t.unsqueeze(1).unsqueeze(1)
-            x_t = ((1 - t_) * x_0 + t_ * x_1).to(self.dtype_torch)
+            x_t = ((1 - t_) * x_0 + t_ * x_1).to(self.dtype)
             if image_latent_mask is not None:
                 x_0 = x_0[:, image_latent_mask[0]]
                 x_1 = x_1[:, image_latent_mask[0]]
@@ -327,13 +416,13 @@ class OminiModel(L.LightningModule):
 
             # Prepare guidance
             guidance = (
-                torch.ones_like(t).to(self.device_torch)
+                torch.ones_like(t).to(self.device)
                 if self.transformer.config.guidance_embeds
                 else None
             )
 
         branch_n = 2 + len(conditions)
-        group_mask = torch.ones([branch_n, branch_n], dtype=torch.bool).to(self.device_torch)
+        group_mask = torch.ones([branch_n, branch_n], dtype=torch.bool).to(self.device)
         # Disable the attention cross different condition branches
         group_mask[2:, 2:] = torch.diag(torch.tensor([1] * len(conditions)))
         # Disable the attention from condition branches to image branch and text branch
@@ -370,6 +459,7 @@ class OminiModel(L.LightningModule):
             else self.log_loss * 0.95 + step_loss.item() * 0.05
         )
         return step_loss
+
 
     def generate_a_sample(self):
         raise NotImplementedError("Generate a sample not implemented.")
@@ -457,7 +547,7 @@ def train(dataset, trainable_model, config, test_function):
     run_name = time.strftime("%Y%m%d-%H%M%S")
 
     # Initialize WanDB
-    wandb_config = training_confIIig.get("wandb", None)
+    wandb_config = training_config.get("wandb", None)
     if wandb_config is not None and is_main_process:
         init_wandb(wandb_config, run_name)
 
@@ -472,6 +562,7 @@ def train(dataset, trainable_model, config, test_function):
         batch_size=training_config.get("batch_size", 1),
         shuffle=True,
         num_workers=training_config["dataloader_workers"],
+        multiprocessing_context="spawn",
     )
 
     # Callbacks for testing and saving checkpoints

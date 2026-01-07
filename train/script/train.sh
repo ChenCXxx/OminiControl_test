@@ -1,7 +1,7 @@
 export OMINI_CONFIG=/home/chchen/lab/OminiControl_test/train/config/config.yaml
 export CUDA_VISIBLE_DEVICES=5
 # *[Specify the WANDB API key]
-export WANDB_API_KEY='179318c62a0c70f15dc2b3dee63e7f68883d922b'
+export WANDB_API_KEY='your_wandb_api_key_here'
 
 echo $OMINI_CONFIG
 export TOKENIZERS_PARALLELISM=true
