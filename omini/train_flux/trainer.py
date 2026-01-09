@@ -311,13 +311,12 @@ class OminiModel(L.LightningModule):
                 ),
                 safe_serialization=True,
             )
-                # 再存 K-MLP
-        k_path_st = os.path.join(path, "k_mlp.safetensors")
-
-        state = self.k_encoder.state_dict()
-
-        safetensors_save(state, k_path_st)
-        print(f"[K-MLP] Saved to {k_path_st}")
+        # Save K-MLP if it exists
+        if hasattr(self, 'k_encoder'):
+            k_path_st = os.path.join(path, "k_mlp.safetensors")
+            state = self.k_encoder.state_dict()
+            safetensors_save(state, k_path_st)
+            print(f"[K-MLP] Saved to {k_path_st}")
 
     def configure_optimizers(self):
         # Freeze the transformer
