@@ -185,6 +185,7 @@ def attn_forward(
     queries, keys, values = [], [], []
 
     # Prepare query, key, value for each encoder hidden state (text branch)
+    # Only using on "Double Stream" transformer blocks
     for i, hidden_state in enumerate(hidden_states2):
         with specify_lora((attn.add_q_proj, attn.add_k_proj, attn.add_v_proj), adapters[i]):
             query = attn.add_q_proj(hidden_state)
@@ -202,6 +203,7 @@ def attn_forward(
         values.append(value)
 
     # Prepare query, key, value for each hidden state (image branch)
+    # Handle image + condition latents
     for i, hidden_state in enumerate(hidden_states):
         with specify_lora((attn.to_q, attn.to_k, attn.to_v), adapters[i + h2_n]):
             query = attn.to_q(hidden_state)
@@ -343,6 +345,7 @@ def single_block_forward(
             mlp_hidden_states[i] = self.act_mlp(self.proj_mlp(h_norm))
         hidden_state_norm.append(h_norm)
 
+    # single stream: only using image branch for attention
     attn_outputs = attn_forward(
         self.attn, hidden_state_norm, adapters, position_embs=position_embs, **kwargs
     )

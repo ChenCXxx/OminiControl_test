@@ -11,14 +11,14 @@ from .trainer import OminiModel, get_config, train
 
 
 class CustomDataset(Dataset):
-    """Map (json text) -> (target image) pairs.
+    """Map (txt content) -> (target image) pairs.
 
-    Expects matching filenames under image_dir/*.png and json_dir/*.json.
+    Expects matching filenames under image_dir/*.png and txt_dir/*.txt.
     """
 
-    def __init__(self, image_dir: str, json_dir: str, size: int = 512):
+    def __init__(self, image_dir: str, txt_dir: str, size: int = 512):
         self.image_dir = image_dir
-        self.json_dir = json_dir
+        self.txt_dir = txt_dir
         self.size = size
         self.to_tensor = T.ToTensor()
 
@@ -27,25 +27,24 @@ class CustomDataset(Dataset):
         pairs = []
         for img_path in imgs:
             stem = os.path.splitext(os.path.basename(img_path))[0]
-            jp = os.path.join(self.json_dir, f"{stem}.json")
-            if not os.path.exists(jp):
-                raise FileNotFoundError(f"Missing json for {os.path.basename(img_path)} at {jp}")
-            pairs.append((img_path, jp))
+            tp = os.path.join(self.txt_dir, f"{stem}.txt")
+            if not os.path.exists(tp):
+                raise FileNotFoundError(f"Missing txt for {os.path.basename(img_path)} at {tp}")
+            pairs.append((img_path, tp))
         if not pairs:
-            raise RuntimeError("No image/json pairs found.")
+            raise RuntimeError("No image/txt pairs found.")
         self.pairs = pairs
 
     def __len__(self):
         return len(self.pairs)
 
     def __getitem__(self, idx):
-        img_path, json_path = self.pairs[idx]
+        img_path, txt_path = self.pairs[idx]
 
         img = Image.open(img_path).convert("RGB")
         img = img.resize((self.size, self.size), Image.BICUBIC)
-        with open(json_path, "r") as f:
-            obj = json.load(f)
-        text = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+        with open(txt_path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
 
         return {
             "image": self.to_tensor(img),
@@ -54,17 +53,37 @@ class CustomDataset(Dataset):
 
 
 @torch.no_grad()
+# def test_function(model, save_path, file_name):
+#     """Simple text->image sampling using one random json prompt."""
+#     if not hasattr(model, "flux_pipe"):
+#         return
+#     # Pick a dummy prompt if no data hook is wired; caller can override.
+#     prompt = "a test image"
+#     os.makedirs(save_path, exist_ok=True)
+#     out = model.flux_pipe(prompt=prompt, height=512, width=512)
+#     img = out.images[0]
+#     img.save(os.path.join(save_path, f"{file_name}.png"))
 def test_function(model, save_path, file_name):
     """Simple text->image sampling using one random json prompt."""
     if not hasattr(model, "flux_pipe"):
         return
-    # Pick a dummy prompt if no data hook is wired; caller can override.
-    prompt = "a test image"
+    #model.set_adapters(["default"])
+    # Load 1.txt from training dataset
+    txt_path = "/home/chchen/lab/flowchart_dataset/structures/1.txt"
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+    except Exception as e:
+        print(f"[Test] Failed to load {txt_path}: {e}")
+        text = "a test image"
+
+    prompt = text
+    print(f"[Test] Using prompt from 1.txt (length: {len(prompt)} chars)")
+    
     os.makedirs(save_path, exist_ok=True)
     out = model.flux_pipe(prompt=prompt, height=512, width=512)
     img = out.images[0]
     img.save(os.path.join(save_path, f"{file_name}.png"))
-
 
 def main():
     # Initialize
@@ -80,15 +99,14 @@ def main():
     # Initialize custom dataset from config
     ds_cfg = training_config.get("dataset", {})
     image_dir = ds_cfg.get("image_dir", "images")
-    json_dir = ds_cfg.get("json_dir", "structure")
+    txt_dir = ds_cfg.get("txt_dir", "structure")
     target_size = ds_cfg.get("target_size", 512)
-    dataset = CustomDataset(image_dir=image_dir, json_dir=json_dir, size=target_size)
+    dataset = CustomDataset(image_dir=image_dir, txt_dir=txt_dir, size=target_size)
 
     # debugging
     try:
         first = dataset[0]
         print(f"[Dataset] first description length (chars): {len(first['description'])}")
-        print(f"[Dataset] first description content: {first['description']}")
     except Exception as e:
         print(f"[Dataset] failed to read first sample: {e}")
 

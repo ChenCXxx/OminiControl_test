@@ -223,7 +223,7 @@ class OminiModel(L.LightningModule):
         return None, None
 
     # ---------- 核心：用你的 target_modules 正則 精準開 requires_grad ----------
-    def _collect_lora_paramsOminiModel_by_config(self, adapter_name: str, target_regex: str):
+    def _collect_lora_params_by_config(self, adapter_name: str, target_regex: str):
         """
         直接從 transformer.named_parameters() 收集 LoRA 參數：
         - 抓到 *.lora_A/B/up/down.weight
@@ -258,7 +258,6 @@ class OminiModel(L.LightningModule):
     def init_lora(self, lora_path: str, lora_config: dict):
         assert (lora_path is not None) or (lora_config is not None), \
             "Either lora_path or lora_config must be provided."
-
         adapter_name = self.active_adapter
         # 預設：用 config 的 target_modules 正則；若無則退回 '.*'
         target_regex = (lora_config or {}).get("target_modules", ".*")
@@ -302,6 +301,8 @@ class OminiModel(L.LightningModule):
         return list(lora_layers)#+k_params
 
     def save_lora(self, path: str):
+        # different branch use different adapter names: I use "default"
+        os.makedirs(path, exist_ok=True)
         for adapter_name in self.adapter_set:
             FluxPipeline.save_lora_weights(
                 save_directory=path,
@@ -498,7 +499,7 @@ class TrainingCallback(L.Callback):
         # Print training progress every n steps
         if self.use_wandb:
             report_dict = {
-                "steps": batch_idx,
+                "batch_idx": batch_idx,
                 "steps": self.total_steps,
                 "epoch": trainer.current_epoch,
                 "gradient_size": gradient_size,

@@ -10,7 +10,7 @@ train:
   dataloader_workers: 5
   save_interval: 1000
   sample_interval: 100
-  max_steps: 50000
+  max_steps: 20000
   gradient_checkpointing: true # (Turn off for faster training)
   save_path: "runs_f_number"
 
@@ -19,7 +19,7 @@ train:
   condition_type: "bokeh"
   dataset:
     image_dir: /home/chchen/lab/flowchart_dataset/images
-    json_dir: /home/chchen/lab/flowchart_dataset/structures
+    txt_dir: /home/chchen/lab/flowchart_dataset/structures
 
     cache_name: "data_512_2M"
     condition_size: 512
@@ -38,7 +38,7 @@ train:
   optimizer:
     type: "Prodigy"
     params:
-      lr: 1
+      lr: 10
       use_bias_correction: true
       safeguard_warmup: true
       weight_decay: 0.01
@@ -46,5 +46,6 @@ train:
   # (To use AdamW Optimizer, uncomment the following lines)
   # optimizer:
   #   type: AdamW
-  #   lr: 1e-4
-  #   weight_decay: 0.001
+  #   params:
+  #     lr: 1e-4
+  #     weight_decay: 0.001
