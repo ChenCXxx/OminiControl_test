@@ -171,6 +171,12 @@ class OminiModel(L.LightningModule):
         super().__init__()
         self.model_config = model_config
         self.optimizer_config = optimizer_config
+        
+        # 固定noise的配置
+        self.use_fixed_noise = model_config.get("use_fixed_noise", False)
+        self.fixed_noise_map = None  # 看到x0 shape後初始化
+        if self.use_fixed_noise:
+            print("[Fixed Noise] fixed noise enabled.")
 
         # Load the Flux pipeline
         self.flux_pipe: FluxPipeline = FluxPipeline.from_pretrained(
@@ -381,7 +387,19 @@ class OminiModel(L.LightningModule):
 
             # Prepare t and x_t
             t = torch.sigmoid(torch.randn((imgs.shape[0],), device=self.device))
-            x_1 = torch.randn_like(x_0).to(self.device)
+            if self.use_fixed_noise:
+                # 使用固定noise
+                if self.fixed_noise_map is None:
+                    self.fixed_noise_map = torch.randn_like(x_0).to(self.device)
+                    print(f"[Fixed Noise] fixed noise map, shape: {self.fixed_noise_map.shape}")
+                if self.fixed_noise_map.shape[0] != x_0.shape[0]:
+                    x_1 = self.fixed_noise_map.repeat(x_0.shape[0] // self.fixed_noise_map.shape[0] + 1, 1, 1)[:x_0.shape[0]]
+                else:
+                    x_1 = self.fixed_noise_map
+            else:
+                # 使用隨機noise
+                x_1 = torch.randn_like(x_0).to(self.device)
+            
             t_ = t.unsqueeze(1).unsqueeze(1)
             x_t = ((1 - t_) * x_0 + t_ * x_1).to(self.dtype)
             if image_latent_mask is not None:

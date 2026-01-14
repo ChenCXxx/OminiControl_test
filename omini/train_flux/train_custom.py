@@ -58,8 +58,17 @@ def test_function(model, save_path, file_name):
     """Simple text->image sampling using one random json prompt."""
     if not hasattr(model, "flux_pipe"):
         return
-    # Pick a dummy prompt if no data hook is wired; caller can override.
-    prompt = "a test image"
+    # Load 1.json from training dataset
+    json_path = "/home/sjtseng0924/OminiControl_test/flowchart_dataset/structures/1.json"
+    try:
+        with open(json_path, "r") as f:
+            obj = json.load(f)
+        prompt = json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+        print(f"[Test] Using prompt from 1.json (length: {len(prompt)} chars)")
+    except Exception as e:
+        print(f"[Test] Failed to load {json_path}: {e}")
+        prompt = "a test image"
+    
     os.makedirs(save_path, exist_ok=True)
     out = model.flux_pipe(prompt=prompt, height=512, width=512)
     img = out.images[0]
