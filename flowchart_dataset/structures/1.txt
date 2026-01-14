@@ -1,0 +1,17 @@
+<DIAGRAM>
+<BLOCKS>
+<BLOCK> <PATH> B1 <TEXT> Christmas </BLOCK>
+<BLOCK> <PATH> B2 <TEXT> Go shopping </BLOCK>
+<BLOCK> <PATH> B3 <TEXT> Let me think </BLOCK>
+<BLOCK> <PATH> B4 <TEXT> Laptop </BLOCK>
+<BLOCK> <PATH> B5 <TEXT> iPhone </BLOCK>
+<BLOCK> <PATH> B6 <TEXT> Car </BLOCK>
+</BLOCKS>
+<RELATIONSHIPS>
+<REL> <FROM> B1 <TO> B2 <LABEL> Get money <DIR> forward </REL>
+<REL> <FROM> B2 <TO> B3 <LABEL>  <DIR> forward </REL>
+<REL> <FROM> B3 <TO> B4 <LABEL> One <DIR> forward </REL>
+<REL> <FROM> B3 <TO> B5 <LABEL> Two <DIR> forward </REL>
+<REL> <FROM> B3 <TO> B6 <LABEL> Three <DIR> forward </REL>
+</RELATIONSHIPS>
+</DIAGRAM>
