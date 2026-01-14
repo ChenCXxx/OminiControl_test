@@ -533,6 +533,7 @@ class TrainingCallback(L.Callback):
                 pl_module,
                 f"{self.save_path}/{self.run_name}/output",
                 f"lora_{self.total_steps}",
+                batch
             )
             pl_module.train()
 
