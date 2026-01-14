@@ -110,7 +110,7 @@ def main():
         optimizer_config=training_config["optimizer"],
         model_config=config.get("model", {}),
         gradient_checkpointing=training_config.get("gradient_checkpointing", False),
-        adapter_names=["default", "default"],
+        adapter_names=["default", None],
     )
 
     train(dataset, trainable_model, config, test_function)
