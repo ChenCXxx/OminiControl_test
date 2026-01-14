@@ -53,16 +53,22 @@ class CustomDataset(Dataset):
 
 
 @torch.no_grad()
+# for large dataset
 # def test_function(model, save_path, file_name):
-#     """Simple text->image sampling using one random json prompt."""
-#     if not hasattr(model, "flux_pipe"):
-#         return
-#     # Pick a dummy prompt if no data hook is wired; caller can override.
-#     prompt = "a test image"
+#     txt_dir = "/home/chchen/lab/flowchart_dataset/data/text"
+#     txt_files = [f for f in os.listdir(txt_dir) if os.path.splitext(f)[1].lower() == ".txt"]
+#     if txt_files:
+#         pick = random.choice(txt_files)
+#         with open(os.path.join(txt_dir, pick), "r", encoding="utf-8") as f:
+#             prompt = f.read().strip()
+#         print(f"[Test] Using random prompt from {pick} ({len(prompt)} chars)")
 #     os.makedirs(save_path, exist_ok=True)
 #     out = model.flux_pipe(prompt=prompt, height=512, width=512)
 #     img = out.images[0]
-#     img.save(os.path.join(save_path, f"{file_name}.png"))
+#     pick_filename = os.path.splitext(pick)[0]  # Get filename without extension
+#     img.save(os.path.join(save_path, f"{file_name}_pick_{pick_filename}.png"))
+
+# for dataset size = 1
 def test_function(model, save_path, file_name):
     """Simple text->image sampling using one random json prompt."""
     if not hasattr(model, "flux_pipe"):
