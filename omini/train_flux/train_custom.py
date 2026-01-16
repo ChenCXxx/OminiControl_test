@@ -14,26 +14,45 @@ class CustomDataset(Dataset):
     """Map (txt content) -> (target image) pairs.
 
     Expects matching filenames under image_dir/*.png and txt_dir/*.txt.
+    Only loads training samples (0-49).
     """
 
-    def __init__(self, image_dir: str, txt_dir: str, size: int = 512):
+    def __init__(self, image_dir: str, txt_dir: str, size: int = 512, train_indices: list = None):
         self.image_dir = image_dir
         self.txt_dir = txt_dir
         self.size = size
         self.to_tensor = T.ToTensor()
 
-        img_files = [f for f in os.listdir(self.image_dir) if os.path.splitext(f)[1].lower() in {".png", ".jpg", ".jpeg"}]
-        imgs = sorted([os.path.join(self.image_dir, f) for f in img_files])
+        # 如果沒有指定 train_indices，預設使用 0-49
+        if train_indices is None:
+            train_indices = list(range(0, 50))  # 0-49 作為訓練資料
+        
         pairs = []
-        for img_path in imgs:
-            stem = os.path.splitext(os.path.basename(img_path))[0]
-            tp = os.path.join(self.txt_dir, f"{stem}.txt")
-            if not os.path.exists(tp):
-                raise FileNotFoundError(f"Missing txt for {os.path.basename(img_path)} at {tp}")
-            pairs.append((img_path, tp))
+        for idx in train_indices:
+            # 檢查 .png, .jpg, .jpeg
+            img_path = None
+            for ext in [".png", ".jpg", ".jpeg"]:
+                potential_path = os.path.join(self.image_dir, f"{idx}{ext}")
+                if os.path.exists(potential_path):
+                    img_path = potential_path
+                    break
+            
+            if img_path is None:
+                print(f"[Warning] Image not found for index {idx}, skipping...")
+                continue
+            
+            txt_path = os.path.join(self.txt_dir, f"{idx}.txt")
+            if not os.path.exists(txt_path):
+                print(f"[Warning] Text not found for index {idx}, skipping...")
+                continue
+            
+            pairs.append((img_path, txt_path))
+        
         if not pairs:
-            raise RuntimeError("No image/txt pairs found.")
+            raise RuntimeError(f"No image/txt pairs found for indices {train_indices}")
+        
         self.pairs = pairs
+        print(f"[Dataset] Loaded {len(self.pairs)} training samples (indices: {min(train_indices)}-{max(train_indices)})")
 
     def __len__(self):
         return len(self.pairs)
@@ -62,58 +81,118 @@ class CustomDataset(Dataset):
 
 
 @torch.no_grad()
-# for large dataset
-# def test_function(model, save_path, file_name):
-#     txt_dir = "/home/chchen/lab/flowchart_dataset/data/text"
-#     txt_files = [f for f in os.listdir(txt_dir) if os.path.splitext(f)[1].lower() == ".txt"]
-#     if txt_files:
-#         pick = random.choice(txt_files)
-#         with open(os.path.join(txt_dir, pick), "r", encoding="utf-8") as f:
-#             prompt = f.read().strip()
-#         print(f"[Test] Using random prompt from {pick} ({len(prompt)} chars)")
-#     os.makedirs(save_path, exist_ok=True)
-#     out = model.flux_pipe(prompt=prompt, height=512, width=512)
-#     img = out.images[0]
-#     pick_filename = os.path.splitext(pick)[0]  # Get filename without extension
-#     img.save(os.path.join(save_path, f"{file_name}_pick_{pick_filename}.png"))
-
-# for dataset size = 1
 def test_function(model, save_path, file_name, batch=None):
-    """Simple text->image sampling using one random json prompt."""
+    """測試函數：使用獨立的測試集 (9995-9999) 來生成圖片"""
     if not hasattr(model, "flux_pipe"):
         return
-    # model.set_adapters(["default"])
-
-    # text prompt (using 1.txt)
-    # txt_path = "/home/chchen/lab/flowchart_dataset/structures/1.txt"
-    # try:
-    #     with open(txt_path, "r", encoding="utf-8") as f:
-    #         prompt = f.read().strip()
-    # except Exception as e:
-    #     print(f"[Test] Failed to load {txt_path}: {e}")
-    #     prompt = "a test image"
-
-    # image size
-    if batch is not None:
-        imgs = batch["image"]
-        prompt = batch["description"][0]
-        target_h, target_w = imgs.shape[2], imgs.shape[3]  # img shape: (batch_size, channels, height, width)
-        print(f"[Test] Using batch image size: {target_w}x{target_h} and prompt: {prompt[:30]}...")
+    
+    # 從配置中獲取資料路徑
+    config = get_config()
+    ds_cfg = config["train"].get("dataset", {})
+    image_dir = ds_cfg.get("image_dir", "images")
+    txt_dir = ds_cfg.get("txt_dir", "outputs")
+    
+    # 測試集索引：9995-9999 (5個測試樣本)
+    test_indices = [9995, 9996, 9997, 9998, 9999]
+    
+    # 隨機選一個測試樣本
+    test_idx = random.choice(test_indices)
+    
+    # 讀取測試圖片和文本
+    img_path = None
+    for ext in [".png", ".jpg", ".jpeg"]:
+        potential_path = os.path.join(image_dir, f"{test_idx}{ext}")
+        if os.path.exists(potential_path):
+            img_path = potential_path
+            break
+    
+    txt_path = os.path.join(txt_dir, f"{test_idx}.txt")
+    
+    if img_path is None or not os.path.exists(txt_path):
+        print(f"[Test] Warning: Test sample {test_idx} not found, using batch data instead")
+        # 如果測試資料不存在，退回使用 batch 資料
+        if batch is not None:
+            imgs = batch["image"]
+            prompt = batch["description"][0]
+            target_h, target_w = imgs.shape[2], imgs.shape[3]
+            print(f"[Test] Using batch image size: {target_w}x{target_h}")
+        else:
+            target_h, target_w = 512, 512
+            prompt = "a test image"
+            print(f"[Test] Using default prompt")
     else:
-        target_h, target_w = 512, 512
-        prompt = "a test image"
-        print(f"[Test] Failed to get batch, using default size: {target_w}x{target_h}")
+        # 成功讀取測試資料
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            prompt = f.read().strip()
+        
+        # 讀取圖片尺寸作為參考
+        img = Image.open(img_path).convert("RGB")
+        target_w, target_h = img.size
+        target_w = (target_w // 16) * 16
+        target_h = (target_h // 16) * 16
+        
+        print(f"[Test] Using test sample {test_idx}: size {target_w}x{target_h}, prompt length: {len(prompt)} chars")
+        print(f"[Test] Prompt preview: {prompt[:80]}...")
 
+    # 獲取模型的長文本處理配置（與 training 保持一致）
+    model_config = getattr(model, 'model_config', {})
+    max_seq_len = model_config.get('max_sequence_length', 512)
+    use_chunked = model_config.get('use_chunked_text_encoding', False)
+    
+    # 檢查 prompt 是否過長
+    tokenizer = model.flux_pipe.tokenizer_2
+    token_count = len(tokenizer.encode(prompt))
+    if token_count > max_seq_len:
+        print(f"[Test] WARNING: Prompt has {token_count} tokens (max={max_seq_len}), will be {'chunked' if use_chunked else 'truncated'}")
+    
     # generate and save
     os.makedirs(save_path, exist_ok=True)
-    out = model.flux_pipe(prompt=prompt, height=target_h, width=target_w)
-    img = out.images[0]
-    img.save(os.path.join(save_path, f"{file_name}.png"))
     
-    # for test fix 512x512
-    out_2 = model.flux_pipe(prompt=prompt, height=512, width=512)
+    # 使用與 training 相同的文本編碼策略
+    if use_chunked and token_count > max_seq_len:
+        # 使用與 training_step 相同的長文本處理
+        from .trainer import encode_prompt_with_long_text_support
+        
+        prompt_embeds, pooled_embeds, text_ids = encode_prompt_with_long_text_support(
+            flux_pipe=model.flux_pipe,
+            prompt=prompt,
+            device=model.flux_pipe.device,
+            num_images_per_prompt=1,
+            max_sequence_length=max_seq_len,
+            use_chunked_encoding=use_chunked,
+            chunk_overlap=model_config.get('text_chunk_overlap', 50),
+        )
+        
+        # 使用預編碼的 embeddings 生成圖片
+        out = model.flux_pipe(
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_embeds,
+            height=target_h,
+            width=target_w,
+        )
+        
+        # 512x512 測試
+        out_2 = model.flux_pipe(
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_embeds,
+            height=512,
+            width=512,
+        )
+    else:
+        # 標準模式：直接使用 prompt（會自動截斷）
+        out = model.flux_pipe(prompt=prompt, height=target_h, width=target_w)
+        out_2 = model.flux_pipe(prompt=prompt, height=512, width=512)
+    
+    img = out.images[0]
+    # 檔名包含測試樣本編號（如果有的話）
+    sample_suffix = f"_test{test_idx}" if 'test_idx' in locals() else ""
+    img.save(os.path.join(save_path, f"{file_name}{sample_suffix}.png"))
+    
+    # 512x512 測試
     img_2 = out_2.images[0]
-    img_2.save(os.path.join(save_path, f"{file_name}_512x512.png"))
+    img_2.save(os.path.join(save_path, f"{file_name}{sample_suffix}_512x512.png"))
+    
+    print(f"[Test] Saved images to {save_path}/{file_name}{sample_suffix}.png")
 
 def main():
     import warnings

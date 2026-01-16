@@ -8,7 +8,7 @@ from peft import LoraConfig, get_peft_model_state_dict
 from torch.utils.data import DataLoader
 import time
 import re
-from typing import List
+from typing import List, Union, Optional
 
 import prodigyopt
 
@@ -31,6 +31,170 @@ def get_config():
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
     return config
+
+
+def encode_prompt_with_long_text_support(
+    flux_pipe: FluxPipeline,
+    prompt: Union[str, List[str]],
+    prompt_2: Optional[Union[str, List[str]]] = None,
+    device: Optional[torch.device] = None,
+    num_images_per_prompt: int = 1,
+    max_sequence_length: int = 512,
+    use_chunked_encoding: bool = False,
+    chunk_overlap: int = 50,
+) -> tuple:
+    """
+    增強版的 prompt encoding 函數，支持長文本處理
+    
+    Args:
+        flux_pipe: FluxPipeline 實例
+        prompt: 要編碼的文本提示
+        prompt_2: 可選的第二個文本提示
+        device: 設備
+        num_images_per_prompt: 每個 prompt 生成的圖片數量
+        max_sequence_length: 最大序列長度（預設 512）
+        use_chunked_encoding: 是否使用分塊編碼（預設 False，使用標準截斷）
+        chunk_overlap: 分塊時的重疊 token 數量
+    
+    Returns:
+        (prompt_embeds, pooled_prompt_embeds, text_ids)
+    
+    處理策略：
+    1. use_chunked_encoding=False（標準模式）：
+       - 使用 FLUX 原生的 encode_prompt，自動截斷超過 max_sequence_length 的部分
+       - 這是最穩定、最常用的方法，與訓練時的行為一致
+       
+    2. use_chunked_encoding=True（實驗性分塊模式）：
+       - 將長文本分成多個 chunk，每個不超過 max_sequence_length
+       - 每個 chunk 分別編碼
+       - 使用 mean pooling 合併多個 chunk 的 embeddings
+       - 注意：這種方法可能導致語義不連續，需要謹慎使用
+    """
+    device = device or flux_pipe.device
+    prompt = [prompt] if isinstance(prompt, str) else prompt
+    batch_size = len(prompt)
+    
+    # 標準模式：直接使用 FLUX 的 encode_prompt（會自動截斷）
+    if not use_chunked_encoding:
+        return flux_pipe.encode_prompt(
+            prompt=prompt,
+            prompt_2=prompt_2,
+            prompt_embeds=None,
+            pooled_prompt_embeds=None,
+            device=device,
+            num_images_per_prompt=num_images_per_prompt,
+            max_sequence_length=max_sequence_length,
+            lora_scale=None,
+        )
+    
+    # 實驗性分塊模式
+    print(f"[Long Text] Using chunked encoding with max_length={max_sequence_length}, overlap={chunk_overlap}")
+    
+    # 先檢查 prompt 實際長度
+    tokenizer = flux_pipe.tokenizer_2
+    text_encoder = flux_pipe.text_encoder_2
+    
+    all_prompt_embeds = []
+    all_pooled_embeds = []
+    
+    for single_prompt in prompt:
+        # 先 tokenize 完整的 prompt 來檢查長度
+        full_tokens = tokenizer(
+            single_prompt,
+            padding=False,
+            truncation=False,
+            return_tensors="pt"
+        ).input_ids[0]
+        
+        total_length = len(full_tokens)
+        
+        # 如果不超過限制，直接編碼
+        if total_length <= max_sequence_length:
+            prompt_embeds, pooled_embeds, _ = flux_pipe.encode_prompt(
+                prompt=[single_prompt],
+                prompt_2=None,
+                device=device,
+                num_images_per_prompt=1,
+                max_sequence_length=max_sequence_length,
+            )
+            all_prompt_embeds.append(prompt_embeds)
+            all_pooled_embeds.append(pooled_embeds)
+            continue
+        
+        # 需要分塊處理
+        print(f"[Long Text] Prompt has {total_length} tokens, splitting into chunks...")
+        
+        # 計算分塊策略
+        chunk_size = max_sequence_length - 2  # 留給 special tokens
+        stride = chunk_size - chunk_overlap
+        
+        chunk_embeds = []
+        chunk_pooled = []
+        
+        # 將 token ids 分成多個 chunk
+        for start_idx in range(0, total_length, stride):
+            end_idx = min(start_idx + chunk_size, total_length)
+            chunk_tokens = full_tokens[start_idx:end_idx]
+            
+            # 解碼回文本（保持語義完整性）
+            chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
+            
+            # 編碼這個 chunk
+            chunk_prompt_embeds, chunk_pooled_embeds, _ = flux_pipe.encode_prompt(
+                prompt=[chunk_text],
+                prompt_2=None,
+                device=device,
+                num_images_per_prompt=1,
+                max_sequence_length=max_sequence_length,
+            )
+            
+            chunk_embeds.append(chunk_prompt_embeds)
+            chunk_pooled.append(chunk_pooled_embeds)
+            
+            # 如果已經到達結尾，停止
+            if end_idx >= total_length:
+                break
+        
+        # 合併多個 chunk 的 embeddings
+        # 策略1: Mean pooling（取平均）
+        merged_embeds = torch.stack(chunk_embeds, dim=0).mean(dim=0)
+        merged_pooled = torch.stack(chunk_pooled, dim=0).mean(dim=0)
+        
+        # 如果序列長度不夠，需要 padding 到 max_sequence_length
+        current_seq_len = merged_embeds.shape[1]
+        if current_seq_len < max_sequence_length:
+            padding_size = max_sequence_length - current_seq_len
+            padding = torch.zeros(
+                merged_embeds.shape[0],
+                padding_size,
+                merged_embeds.shape[2],
+                dtype=merged_embeds.dtype,
+                device=merged_embeds.device
+            )
+            merged_embeds = torch.cat([merged_embeds, padding], dim=1)
+        elif current_seq_len > max_sequence_length:
+            # 如果超過，裁剪到 max_sequence_length
+            merged_embeds = merged_embeds[:, :max_sequence_length, :]
+        
+        all_prompt_embeds.append(merged_embeds)
+        all_pooled_embeds.append(merged_pooled)
+        
+        print(f"[Long Text] Merged {len(chunk_embeds)} chunks into single embedding")
+    
+    # 合併 batch 中所有 prompt 的結果
+    prompt_embeds = torch.cat(all_prompt_embeds, dim=0)
+    pooled_prompt_embeds = torch.cat(all_pooled_embeds, dim=0)
+    
+    # 生成 text_ids
+    dtype = flux_pipe.transformer.dtype
+    text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(device=device, dtype=dtype)
+    
+    # Duplicate for num_images_per_prompt
+    if num_images_per_prompt > 1:
+        prompt_embeds = prompt_embeds.repeat(num_images_per_prompt, 1, 1)
+        pooled_prompt_embeds = pooled_prompt_embeds.repeat(num_images_per_prompt, 1)
+    
+    return prompt_embeds, pooled_prompt_embeds, text_ids
 
 
 def init_wandb(wandb_config, run_name):
@@ -365,19 +529,23 @@ class OminiModel(L.LightningModule):
             x_0, img_ids = encode_images(self.flux_pipe, imgs)
 
             # Prepare text input
+            # 支持長文本處理：可以選擇使用標準截斷或分塊編碼
+            use_chunked = self.model_config.get("use_chunked_text_encoding", False)
+            chunk_overlap = self.model_config.get("text_chunk_overlap", 50)
+            
             (
                 prompt_embeds,
                 pooled_prompt_embeds,
                 text_ids,
-            ) = self.flux_pipe.encode_prompt(
+            ) = encode_prompt_with_long_text_support(
+                flux_pipe=self.flux_pipe,
                 prompt=prompts,
                 prompt_2=None,
-                prompt_embeds=None,
-                pooled_prompt_embeds=None,
                 device=self.flux_pipe.device,
                 num_images_per_prompt=1,
                 max_sequence_length=self.model_config.get("max_sequence_length", 512),
-                lora_scale=None,
+                use_chunked_encoding=use_chunked,
+                chunk_overlap=chunk_overlap,
             )
 
             # Prepare t and x_t
