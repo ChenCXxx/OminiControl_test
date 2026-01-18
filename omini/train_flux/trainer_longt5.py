@@ -17,6 +17,9 @@ import math
 from typing import List
 from safetensors.torch import save_file as safetensors_save, load_file as safetensors_load
 
+# use t5 encoder
+from transformers import AutoTokenizer, LongT5ForConditionalGeneration
+
 def get_rank():
     try:
         rank = int(os.environ.get("LOCAL_RANK"))
@@ -171,6 +174,9 @@ class OminiModel(L.LightningModule):
         super().__init__()
         self.model_config = model_config
         self.optimizer_config = optimizer_config
+        # add device and dtype attributes
+        self.device_torch = torch.device(device)
+        self.dtype_torch = dtype
 
         # Load the Flux pipeline
         self.flux_pipe: FluxPipeline = FluxPipeline.from_pretrained(
@@ -180,9 +186,32 @@ class OminiModel(L.LightningModule):
         self.transformer.gradient_checkpointing = gradient_checkpointing
         self.transformer.train()
 
+        # Load LongT5 model for text encoding
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "Stancld/longt5-tglobal-large-16384-pubmed-3k_steps"
+        )
+        self.longt5 = LongT5ForConditionalGeneration.from_pretrained(
+            "Stancld/longt5-tglobal-large-16384-pubmed-3k_steps"
+        ).to(device=device, dtype=dtype).eval()
+
+        for p in self.longt5.parameters():  # Freeze LongT5 parameters
+            p.requires_grad_(False)
+
+        t5_hidden = self.longt5.config.d_model  # typically 1024
+        flux_token_dim = self.transformer.context_embedder.in_features  # flux: 4096
+        self.t5_proj = torch.nn.Linear(
+            t5_hidden, flux_token_dim, bias=False
+        ).to(device=device, dtype=dtype)
+
+        self.t5_pool_proj = torch.nn.Linear(
+            flux_token_dim, 768, bias=False
+        ).to(device=device, dtype=dtype)
+
+        self.t5_proj_params = list(self.t5_proj.parameters()) + list(self.t5_pool_proj.parameters())
+
         # Freeze the Flux pipeline
-        self.flux_pipe.text_encoder.requires_grad_(False).eval() # clip -> global + latent
-        self.flux_pipe.text_encoder_2.requires_grad_(False).eval() # t5 encoder (modulation) -> long t5 
+        self.flux_pipe.text_encoder.requires_grad_(False).eval()
+        self.flux_pipe.text_encoder_2.requires_grad_(False).eval()
         self.flux_pipe.vae.requires_grad_(False).eval()
         self.adapter_names = adapter_names
         self.adapter_set = set([each for each in adapter_names if each is not None])
@@ -447,9 +476,9 @@ class OminiModel(L.LightningModule):
             return_dict=False,
             group_mask=group_mask,
         )
-        pred = transformer_out[0]  # pred shape: (B, latent_dim, H, W)
+        pred = transformer_out[0]
 
-        # Compute loss for each batch (mean over batch)
+        # Compute loss
         step_loss = torch.nn.functional.mse_loss(pred, (x_1 - x_0), reduction="mean")
         self.last_t = t.mean().item()
 
@@ -533,8 +562,6 @@ class TrainingCallback(L.Callback):
                 pl_module,
                 f"{self.save_path}/{self.run_name}/output",
                 f"lora_{self.total_steps}",
-                batch=batch,
-                training_config=self.training_config
             )
             pl_module.train()
 

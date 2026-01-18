@@ -49,12 +49,13 @@ def encode_images(pipeline: FluxPipeline, images: torch.Tensor):
     ) * pipeline.vae.config.scaling_factor
     images_tokens = pipeline._pack_latents(images, *images.shape)
     images_ids = pipeline._prepare_latent_image_ids(
-        images.shape[0],
-        images.shape[2],
-        images.shape[3],
+        images.shape[0],  # batch size
+        images.shape[2],  # height -> dynamic size
+        images.shape[3],  # width -> dynamic size
         pipeline.device,
         pipeline.dtype,
     )
+    # Ensure the ids shape matches the tokens shape
     if images_tokens.shape[1] != images_ids.shape[0]:
         images_ids = pipeline._prepare_latent_image_ids(
             images.shape[0],

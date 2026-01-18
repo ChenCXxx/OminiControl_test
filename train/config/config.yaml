@@ -6,20 +6,28 @@ model:
   max_sequence_length: 512
 
 train:
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 32
+  batch_size: 1
   dataloader_workers: 5
-  save_interval: 1000
-  sample_interval: 100
-  max_steps: 20000
+  print_every_n_steps: 32
+  save_interval: 2000
+  sample_interval: 500 
+  max_steps: 15000
+  max_epochs: 10000 # (Set a high number to rely on max_steps)
   gradient_checkpointing: true # (Turn off for faster training)
   save_path: "runs_f_number"
 
   # Specify the type of condition to use. 
   # Options: ["canny", "coloring", "deblurring", "depth", "depth_pred", "fill"]
   condition_type: "bokeh"
+  test_dataset:
+    image_dir: /home/chchen/lab/OminiControl_test/dataset/data/test/images
+    txt_dir: /home/chchen/lab/OminiControl_test/dataset/data/test/text
+  
   dataset:
-    image_dir: /home/chchen/lab/flowchart_dataset/images
-    txt_dir: /home/chchen/lab/flowchart_dataset/structures
+    image_dir: /home/chchen/lab/OminiControl_test/dataset/data/train/images
+    txt_dir: /home/chchen/lab/OminiControl_test/dataset/data/train/text
+    json_dir: /home/chchen/lab/OminiControl_test/dataset/data/train/json
 
     cache_name: "data_512_2M"
     condition_size: 512
@@ -38,7 +46,7 @@ train:
   optimizer:
     type: "Prodigy"
     params:
-      lr: 10
+      lr: 3
       use_bias_correction: true
       safeguard_warmup: true
       weight_decay: 0.01

@@ -62,58 +62,94 @@ class CustomDataset(Dataset):
 
 
 @torch.no_grad()
-# for large dataset
-# def test_function(model, save_path, file_name):
-#     txt_dir = "/home/chchen/lab/flowchart_dataset/data/text"
-#     txt_files = [f for f in os.listdir(txt_dir) if os.path.splitext(f)[1].lower() == ".txt"]
-#     if txt_files:
-#         pick = random.choice(txt_files)
-#         with open(os.path.join(txt_dir, pick), "r", encoding="utf-8") as f:
-#             prompt = f.read().strip()
-#         print(f"[Test] Using random prompt from {pick} ({len(prompt)} chars)")
-#     os.makedirs(save_path, exist_ok=True)
-#     out = model.flux_pipe(prompt=prompt, height=512, width=512)
-#     img = out.images[0]
-#     pick_filename = os.path.splitext(pick)[0]  # Get filename without extension
-#     img.save(os.path.join(save_path, f"{file_name}_pick_{pick_filename}.png"))
-
 # for dataset size = 1
-def test_function(model, save_path, file_name, batch=None):
-    """Simple text->image sampling using one random json prompt."""
-    if not hasattr(model, "flux_pipe"):
-        return
-    # model.set_adapters(["default"])
+# def test_function(model, save_path, file_name, batch=None, training_config=None):
+#     """Simple text->image sampling using one random json prompt."""
+#     if not hasattr(model, "flux_pipe"):
+#         return
+#     # model.set_adapters(["default"])
 
-    # text prompt (using 1.txt)
-    # txt_path = "/home/chchen/lab/flowchart_dataset/structures/1.txt"
-    # try:
-    #     with open(txt_path, "r", encoding="utf-8") as f:
-    #         prompt = f.read().strip()
-    # except Exception as e:
-    #     print(f"[Test] Failed to load {txt_path}: {e}")
-    #     prompt = "a test image"
+#     # text prompt (using 1.txt)
+#     # txt_path = "/home/chchen/lab/flowchart_dataset/structures/1.txt"
+#     # try:
+#     #     with open(txt_path, "r", encoding="utf-8") as f:
+#     #         prompt = f.read().strip()
+#     # except Exception as e:
+#     #     print(f"[Test] Failed to load {txt_path}: {e}")
+#     #     prompt = "a test image"
 
-    # image size
-    if batch is not None:
-        imgs = batch["image"]
-        prompt = batch["description"][0]
-        target_h, target_w = imgs.shape[2], imgs.shape[3]  # img shape: (batch_size, channels, height, width)
-        print(f"[Test] Using batch image size: {target_w}x{target_h} and prompt: {prompt[:30]}...")
-    else:
-        target_h, target_w = 512, 512
-        prompt = "a test image"
-        print(f"[Test] Failed to get batch, using default size: {target_w}x{target_h}")
+#     # image size
+#     if batch is not None:
+#         imgs = batch["image"]
+#         prompt = batch["description"][0]
+#         target_h, target_w = imgs.shape[2], imgs.shape[3]  # img shape: (batch_size, channels, height, width)
+#         print(f"[Test] Using batch image size: {target_w}x{target_h} and prompt: {prompt[:30]}...")
+#     else:
+#         target_h, target_w = 512, 512
+#         prompt = "a test image"
+#         print(f"[Test] Failed to get batch, using default size: {target_w}x{target_h}")
 
-    # generate and save
-    os.makedirs(save_path, exist_ok=True)
-    out = model.flux_pipe(prompt=prompt, height=target_h, width=target_w)
-    img = out.images[0]
-    img.save(os.path.join(save_path, f"{file_name}.png"))
+#     # generate and save
+#     os.makedirs(save_path, exist_ok=True)
+#     out = model.flux_pipe(prompt=prompt, height=target_h, width=target_w)
+#     img = out.images[0]
+#     img.save(os.path.join(save_path, f"{file_name}.png"))
     
-    # for test fix 512x512
-    out_2 = model.flux_pipe(prompt=prompt, height=512, width=512)
-    img_2 = out_2.images[0]
-    img_2.save(os.path.join(save_path, f"{file_name}_512x512.png"))
+    
+#     # for test fix 512x512
+#     out_2 = model.flux_pipe(prompt=prompt, height=512, width=512)
+#     img_2 = out_2.images[0]
+#     img_2.save(os.path.join(save_path, f"{file_name}_512x512.png"))
+
+# for multiple dataset
+def test_function(model, save_path, file_name, batch=None, training_config=None):
+    if not training_config:
+        print("[Test] Error: No training_config provided.")
+        return
+    
+    # get dataset from config
+    test_ds_cfg = training_config.get("test_dataset", {})
+    image_dir = test_ds_cfg.get("image_dir")
+    txt_dir = test_ds_cfg.get("txt_dir")
+
+    if not image_dir or not os.path.exists(image_dir):
+        print(f"[Test] Warning: Test image_dir not found: {image_dir}")
+        return
+    
+    current_step_dir = os.path.join(save_path, file_name)
+    os.makedirs(current_step_dir, exist_ok=True)
+    print(f"[Test] Saving to: {current_step_dir}")
+
+    valid_exts = {".png", ".jpg", ".jpeg"}
+    target_files = sorted([f for f in os.listdir(image_dir) if os.path.splitext(f)[1].lower() in valid_exts])
+    
+    for img_file in target_files:
+        try:
+            # load prompt
+            stem = os.path.splitext(img_file)[0]
+            img_path = os.path.join(image_dir, img_file)
+            txt_path = os.path.join(txt_dir, f"{stem}.txt")
+            if not os.path.exists(txt_path):
+                print(f"[Test] Warning: Missing txt for {img_file}")
+                prompt = "a test image"
+            else:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    prompt = f.read().strip()
+
+            # load image to get size
+            img = Image.open(img_path).convert("RGB")
+            w, h = img.size
+            target_w = (w // 16) * 16
+            target_h = (h // 16) * 16
+
+            # generate and save
+            out = model.flux_pipe(prompt=prompt, height=target_h, width=target_w)
+            img = out.images[0]
+            img.save(os.path.join(current_step_dir, img_file))
+            print(f"[Test] Saved: {img_file} with prompt length {len(prompt)}")
+
+        except Exception as e:
+            print(f"[Test] Failed: {e}")
 
 def main():
     import warnings
