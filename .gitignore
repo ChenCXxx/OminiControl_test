@@ -1,5 +1,9 @@
 runs*
 wandb/
 test*
-
+output*
+samples/
+images*
+txt*
+train/script
 __pycache__/

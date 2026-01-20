@@ -4,13 +4,16 @@ dtype: "bfloat16"
 model:
   independent_condition: false
   max_sequence_length: 512
+  
+  # 長文本處理
+  use_chunked_text_encoding: true
 
 train:
   accumulate_grad_batches: 4
   dataloader_workers: 5
   save_interval: 1000
   sample_interval: 100
-  max_steps: 20000
+  max_steps: 50000
   gradient_checkpointing: true # (Turn off for faster training)
   save_path: "runs_f_number"
 
@@ -18,8 +21,8 @@ train:
   # Options: ["canny", "coloring", "deblurring", "depth", "depth_pred", "fill"]
   condition_type: "bokeh"
   dataset:
-    image_dir: /home/chchen/lab/flowchart_dataset/images
-    txt_dir: /home/chchen/lab/flowchart_dataset/structures
+    image_dir: /home/sjtseng0924/OminiControl_test/images
+    txt_dir: /home/sjtseng0924/OminiControl_test/outputs
 
     cache_name: "data_512_2M"
     condition_size: 512
@@ -46,6 +49,5 @@ train:
   # (To use AdamW Optimizer, uncomment the following lines)
   # optimizer:
   #   type: AdamW
-  #   params:
-  #     lr: 1e-4
-  #     weight_decay: 0.001
+  #   lr: 1e-4
+  #   weight_decay: 0.001

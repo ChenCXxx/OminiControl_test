@@ -98,17 +98,17 @@ def encode_prompt_with_long_text_support(
     all_pooled_embeds = []
     
     for single_prompt in prompt:
-        # 先 tokenize 完整的 prompt 來檢查長度
         full_tokens = tokenizer(
             single_prompt,
             padding=False,
             truncation=False,
-            return_tensors="pt"
+            add_special_tokens=False,
+            return_tensors="pt",
         ).input_ids[0]
         
         total_length = len(full_tokens)
         
-        # 如果不超過限制，直接編碼
+        # 不超過限制
         if total_length <= max_sequence_length:
             prompt_embeds, pooled_embeds, _ = flux_pipe.encode_prompt(
                 prompt=[single_prompt],
@@ -123,58 +123,82 @@ def encode_prompt_with_long_text_support(
         
         # 需要分塊處理
         print(f"[Long Text] Prompt has {total_length} tokens, splitting into chunks...")
-        
-        # 計算分塊策略
-        chunk_size = max_sequence_length - 2  # 留給 special tokens
-        stride = chunk_size - chunk_overlap
-        
+
+        # pooled embeddings 仍用原生 encode_prompt（與原本流程一致）
+        _, pooled_embeds, _ = flux_pipe.encode_prompt(
+            prompt=[single_prompt],
+            prompt_2=None,
+            device=device,
+            num_images_per_prompt=1,
+            max_sequence_length=max_sequence_length,
+        )
+
+        bos = tokenizer.bos_token_id
+        eos = tokenizer.eos_token_id
+        pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else (eos if eos is not None else 0)
+        add_special = bos is not None and eos is not None
+        start_id = bos if bos is not None else eos
+        end_id = eos if eos is not None else start_id
+        # 參考LPW
+        chunk_size = max_sequence_length - 2 if add_special else max_sequence_length
+        stride = chunk_size
+
         chunk_embeds = []
-        chunk_pooled = []
-        
+
         # 將 token ids 分成多個 chunk
         for start_idx in range(0, total_length, stride):
             end_idx = min(start_idx + chunk_size, total_length)
-            chunk_tokens = full_tokens[start_idx:end_idx]
-            
-            # 解碼回文本（保持語義完整性）
-            chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
-            
-            # 編碼這個 chunk
-            chunk_prompt_embeds, chunk_pooled_embeds, _ = flux_pipe.encode_prompt(
-                prompt=[chunk_text],
-                prompt_2=None,
+            chunk_tokens = full_tokens[start_idx:end_idx].tolist()
+
+            if add_special:
+                input_ids = [start_id] + chunk_tokens + [end_id]
+            else:
+                input_ids = chunk_tokens
+
+            valid_len = len(input_ids)
+            if valid_len < max_sequence_length:
+                input_ids = input_ids + [pad] * (max_sequence_length - valid_len)
+
+            input_ids = torch.tensor([input_ids], device=device, dtype=torch.long)
+            attention_mask = torch.tensor(
+                [[1] * valid_len + [0] * (max_sequence_length - valid_len)],
                 device=device,
-                num_images_per_prompt=1,
-                max_sequence_length=max_sequence_length,
+                dtype=torch.long,
             )
-            
-            chunk_embeds.append(chunk_prompt_embeds)
-            chunk_pooled.append(chunk_pooled_embeds)
-            
-            # 如果已經到達結尾，停止
+
+            encoder_out = text_encoder(input_ids=input_ids, attention_mask=attention_mask)
+            chunk_embed = encoder_out[0][0, :valid_len, :]
+            chunk_embeds.append(chunk_embed)
             if end_idx >= total_length:
                 break
-        
+
         # 合併多個 chunk 的 embeddings
-        # 策略1: Mean pooling（取平均）
-        merged_embeds = torch.stack(chunk_embeds, dim=0).mean(dim=0)
-        merged_pooled = torch.stack(chunk_pooled, dim=0).mean(dim=0)
-        
-        # 如果序列長度不夠，需要 padding 到 max_sequence_length
-        current_seq_len = merged_embeds.shape[1]
-        if current_seq_len < max_sequence_length:
-            padding_size = max_sequence_length - current_seq_len
-            padding = torch.zeros(
-                merged_embeds.shape[0],
-                padding_size,
-                merged_embeds.shape[2],
-                dtype=merged_embeds.dtype,
-                device=merged_embeds.device
+        trimmed_chunks = []
+        for i, chunk_embed in enumerate(chunk_embeds):
+            if add_special and len(chunk_embeds) > 1 and chunk_embed.shape[0] > 1:
+                if i == 0:
+                    chunk_embed = chunk_embed[:-1]  # drop EOS
+                elif i == len(chunk_embeds) - 1:
+                    chunk_embed = chunk_embed[1:]   # drop BOS
+                else:
+                    chunk_embed = chunk_embed[1:-1]  # drop BOS & EOS
+            trimmed_chunks.append(chunk_embed)
+
+        merged_tokens = torch.cat(trimmed_chunks, dim=0)
+        if merged_tokens.shape[0] > max_sequence_length:
+            merged_tokens = merged_tokens[:max_sequence_length, :]
+        elif merged_tokens.shape[0] < max_sequence_length:
+            pad_len = max_sequence_length - merged_tokens.shape[0]
+            pad = torch.zeros(
+                pad_len,
+                merged_tokens.shape[1],
+                dtype=merged_tokens.dtype,
+                device=merged_tokens.device,
             )
-            merged_embeds = torch.cat([merged_embeds, padding], dim=1)
-        elif current_seq_len > max_sequence_length:
-            # 如果超過，裁剪到 max_sequence_length
-            merged_embeds = merged_embeds[:, :max_sequence_length, :]
+            merged_tokens = torch.cat([merged_tokens, pad], dim=0)
+
+        merged_embeds = merged_tokens.unsqueeze(0)
+        merged_pooled = pooled_embeds
         
         all_prompt_embeds.append(merged_embeds)
         all_pooled_embeds.append(merged_pooled)
